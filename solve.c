@@ -1,20 +1,19 @@
+// This is a personal academic project. Dear PVS-Studio, please check it.
+// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <stdio.h>
-#include <dirent.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <math.h>
-#include <semaphore.h>
-#include <pthread.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <semaphore.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <pthread.h>
 
 
 #define FILE_LENGTH 100 
@@ -26,15 +25,13 @@
 
 
 static void run_and_check_error(int error, char message[], int retval);
-
-static void read_from_slave(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char* buffer_ptr,sem_t * sem, sem_t * file_counter);   
+static void listen_to_slaves(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char* buffer_ptr,sem_t * sem, sem_t * file_counter);   
 static void send_files(int fd, int filesAmmount,int * file_index, char * argv[]);
+static void close_pipes(int file_pipes[][2], int buffer_pipes[][2], int slavesAmmount);
 
 int main(int argc, char * argv[]) {
-    
-  
 
-    
+    //checks that at least 1 file is sent as parameter
     if(argc-1 <= 0){
         printf("No files registered\n");
         return -1;
@@ -45,49 +42,82 @@ int main(int argc, char * argv[]) {
     int file_index = 1;
     int files = argc-1;
 
+    //calculating number of slaves to create
     int slavesAmmount = (files)/20 + 1;
-    int * slaves = malloc(sizeof(int) * slavesAmmount);
 
+    //array to save the pids of the slaves
+    int * slaves;
+    if((slaves = malloc(sizeof(int) * slavesAmmount)) == NULL){
+        dprintf(STDERR_FILENO, "No more space available for memory allocation\n");
+        exit(EXIT_FAILURE);
+    }
+
+    //creates and initialices shared memory
     int buffer_fd; 
-    run_and_check_error(buffer_fd = shm_open("/shared_memory", O_CREAT | O_RDWR  , 0600), "Error when creating shm", -1); /* create s.m object*/   
-    run_and_check_error(ftruncate(buffer_fd, BUFFER_SIZE*sizeof(char)), "Error when setting size of shm", -1);                                 /* resize memory object */
-    char * buffer = mmap(NULL, BUFFER_SIZE*sizeof(char), PROT_WRITE, MAP_SHARED, buffer_fd, 0);
+    run_and_check_error(buffer_fd = shm_open("/shared_memory", O_CREAT | O_RDWR  , 0600), "Error when creating shm", -1);  
+    run_and_check_error(ftruncate(buffer_fd, BUFFER_SIZE * sizeof(char)), "Error when setting size of shm", -1);  
+                                  
+    char * buffer;
+    if((buffer = mmap(NULL, BUFFER_SIZE * sizeof(char), PROT_WRITE, MAP_SHARED, buffer_fd, 0)) == (void *) -1 ){
+        dprintf(STDERR_FILENO, "Error when doing mmap on shared memory\n");
+        exit(EXIT_FAILURE);
+    }
 
-    sem_t * access_shm = sem_open("access_shm", O_CREAT, 0666, 1);
-    sem_t * file_counter = sem_open("files_ready_to_print", O_CREAT | O_RDWR, 0666,0);
+    //creates the two semaphores:
+    //sem used to write and read from shared memory
+    sem_t * access_shm;
+    if((access_shm = sem_open("access_shm", O_CREAT, 0666, 1)) == SEM_FAILED){
+        dprintf(STDERR_FILENO, "Error when creating access_shm sem\n");
+        exit(EXIT_FAILURE);
+    }
+    //sem used to tell view.c when it has a new file to print
+    sem_t * file_counter;
+    if((file_counter = sem_open("file_counter", O_CREAT | O_RDWR, 0666, 0)) == SEM_FAILED) {
+        dprintf(STDERR_FILENO, "Error when creating file_counter sem\n");
+        exit(EXIT_FAILURE);
+    }
 
-
-    sleep(3);
-    printf("%d\n",argc-1);
+    //output file with all the output read from the slaves
+    FILE * result;
+    if((result = fopen("result", "w")) == NULL){
+        dprintf(STDERR_FILENO, "Unable to open file: result\n");
+        exit(EXIT_FAILURE);  
+    }
     
-    int file_pipes[slavesAmmount][2];
-    int buffer_pipes[slavesAmmount][2];
+    //waits two seconds for view
+    sleep(2);
+    printf("%d\n", argc-1);
+    
+    //creates two arrays of which will contain the pipes: 
+    int file_pipes[slavesAmmount][2]; //pipes that go from solve to slaves
+    int buffer_pipes[slavesAmmount][2]; //pipes that go from slaves to solve
 
+    //creates pipes
     for(int i = 0; i < slavesAmmount; i++) {
-        run_and_check_error(pipe(file_pipes[i]),"Error creating file pipe!\n",-1);
-        run_and_check_error(pipe(buffer_pipes[i]),"Error creating buffer pipe!\n",-1);
+        run_and_check_error(pipe(file_pipes[i]), "Error creating file pipe!\n", -1);
+        run_and_check_error(pipe(buffer_pipes[i]), "Error creating buffer pipe!\n", -1);
     }
 
     int pid;
-    // Creo mi cantidad de esclavos.
+    // Slave generator(creates slavesAmmount slaves)
     for(int i = 0; i < slavesAmmount; i++) {
         run_and_check_error(pid = fork(), "Error forking\n", -1);
         if(pid == 0){
-            run_and_check_error(close(fileno(stdin)),"Error closing STDIN\n", -1);
-            run_and_check_error(dup(file_pipes[i][0]),"Error dupping file pipe\n", -1); // new STDIN: read-end of master-to-slave pipe N°i
-            run_and_check_error(close(fileno(stdout)),"Error closing STDOUT\n", -1);       
-            run_and_check_error(dup(buffer_pipes[i][1]),"Error dupping buffer pipe\n", -1); // new STDOUT: write-end of slave-to-master pipe N°i
+            //Linking STDIN and STDOUT to the ends of our pipes so when the slave tries to output something
+            //it is sent to the parent process instead. 
+            run_and_check_error(close(fileno(stdin)), "Error closing STDIN\n", -1);
+            run_and_check_error(dup(file_pipes[i][0]), "Error dupping file pipe\n", -1); 
+            run_and_check_error(close(fileno(stdout)), "Error closing STDOUT\n", -1);       
+            run_and_check_error(dup(buffer_pipes[i][1]), "Error dupping buffer pipe\n", -1); 
 
-            for(int i = 0; i<slavesAmmount;i++){
-                close(file_pipes[i][0]);
-                close(file_pipes[i][1]);
-                close(buffer_pipes[i][0]);
-                close(buffer_pipes[i][1]);
-            }
-
+            //Closing all pipes because we no longer use them. 
+            close_pipes(file_pipes, buffer_pipes, slavesAmmount);
+            
+            //Replacing the entire code with the slave code.
             execv("slave",argv);
         }
         else {   
+            //Stores the PID of each slave and sends them the initial files for them to process.
             slaves[i] = pid; 
             if(file_index > argc - INITIAL_FILES_TO_GIVE_OUT){
                 send_files(file_pipes[i][1], 1, &file_index, argv);            
@@ -96,104 +126,123 @@ int main(int argc, char * argv[]) {
             }
         }
     }
-    read_from_slave(buffer_pipes, slavesAmmount, argc, &file_index, argv, file_pipes,buffer, access_shm, file_counter);
     
-    sem_unlink("access_shm");
-    sem_unlink("files_ready_to_print");
-    sem_close(file_counter);
-    sem_close(access_shm);
+    //All of this will only be executed by the parent process, since the slaves have replaced their entire code.
+    //Reading from slaves and sending files to those who finished. Updating the shared memory as I go.
+    listen_to_slaves(buffer_pipes, slavesAmmount, argc, &file_index, argv, file_pipes,buffer, access_shm, file_counter);
+    
+    //Storing the shared memory on the result file.
+    fprintf(result, "%s", buffer);
 
+
+    close_pipes(file_pipes, buffer_pipes, slavesAmmount);
+
+    //Freeing everything and deleting all the shared memory that was created (such as the semaphores) and closing all pipes.     
+    run_and_check_error(shm_unlink("/shared_memory"), "Error when unlinking shared memory\n", -1);
+    run_and_check_error(munmap(buffer,BUFFER_SIZE*sizeof(char)), "Error when doing munmap\n", -1);
+    run_and_check_error(sem_unlink("access_shm"), "Error when unlinking semaphore\n", -1);
+    run_and_check_error(sem_unlink("file_counter"), "Error when unlinking semaphore\n", -1);
+    run_and_check_error(sem_close(file_counter), "Error closing semaphore\n", -1);
+    run_and_check_error(sem_close(access_shm), "Error closing semaphore\n", -1);
+    run_and_check_error(fclose(result), "Could not close result file\n", -1);
+
+    //Killing all the slave processes that might still be running...
     for(int i = 0; i < slavesAmmount; i++) {
-        printf("Matando el proceso %d\n", slaves[i]);
-        kill(slaves[i], SIGKILL);
+        run_and_check_error(kill(slaves[i], SIGKILL), "Could not kill slave!\n", -1);
     }
-
     free(slaves);
     
     return 0;
 }
 
-static void read_from_slave(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char * buffer_ptr, sem_t * sem,sem_t*file_counter) {
-
+static void listen_to_slaves(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char * buffer_ptr, sem_t * sem,sem_t*file_counter) {
     int files_received = 0;
 
     fd_set all_fd, aux_fd;
     FD_ZERO(&all_fd);
     int retval;
     int max_fd = 0;
-    FILE * resultado = fopen("resultado", "w");
-
+     
+    //until all files are processed and read by solve
     while(files_received < argc-1) {
 
+        //setting the fd_set to use in select
         for(int i = 0; i < slavesAmmount; i++) {
             if(max_fd < buffer_pipes[i][0]){
                 max_fd = buffer_pipes[i][0];
             }
-            FD_SET(buffer_pipes[i][0], &all_fd);   // always prepare the readable-fds-set for reading
+            FD_SET(buffer_pipes[i][0], &all_fd); 
         }
+
+        //we use an auxiliar fd_set because select modifies the fd_set sent as parameter
         aux_fd = all_fd;
-        retval = select( max_fd + 1, &aux_fd, NULL, NULL, NULL ); // blocks until a child has something to write to parent
+        //select used to know from which pipes there is something to read
+        retval = select( max_fd + 1, &aux_fd, NULL, NULL, NULL );
 
         if(retval > 0){
             for(int i = 0; i < slavesAmmount; i++) {
                 if(FD_ISSET(buffer_pipes[i][0], &aux_fd)) {
-                    char * answer = calloc(MAX_LENGTH_TO_READ, sizeof(char));
+                    char * answer;
+                    if((answer = calloc(MAX_LENGTH_TO_READ, sizeof(char))) == NULL){
+                        dprintf(STDERR_FILENO, "No more space available for memory allocation\n");
+                        exit(EXIT_FAILURE);
+                    }
+                
                     run_and_check_error(read(buffer_pipes[i][0], answer, MAX_LENGTH_TO_READ), "Could not read files!\n", -1);
                
-                    //SEMAPHORE 
+                    //uses semaphore to access shared memory
                     sem_wait(sem);
                     strcat(buffer_ptr, answer);
                     sem_post(sem);
+                    //increases the semaphore used as a file counter that can be printf by view
                     sem_post(file_counter);
                     free(answer);
-                
-                    printf("Slave %d sends: \n", i);
-                    
+
+                    //increases the number of files already processed. When all files are done, the while ends
                     files_received++;
 
-
-                    if(*file_index < argc) { // BANCA!, puede que haya un slave con la file que me falta, No puedo mandar mas quiza                                                                      ////        este if        ////////
+                    //sends a new file to the slave that has no file to process if there are remaining files
+                    if(*file_index < argc) {
                         send_files(file_pipes[i][1], 1, file_index, argv);     
                     }
                 }
             }
         }
     }
-    
-    
-    fprintf(resultado, "%s", buffer_ptr);
-    shm_unlink("/shared_memory");
-    
-    munmap(buffer_ptr,BUFFER_SIZE*sizeof(char));
-
-    
 }
 
 
 static void send_files(int fd, int filesAmmount,int * file_index, char * argv[]) {
     char * file;
-
-    if((file=calloc(FILE_LENGTH, sizeof(char))) == NULL) {
+    if((file = calloc(FILE_LENGTH, sizeof(char))) == NULL) {
         dprintf(STDERR_FILENO,"No more space available for memory allocation\n");
         exit(EXIT_FAILURE);
     }
 
+    //concats into a single string the names of "filesAmount" of files with a '$' in between of them
     for(int i = 0; i < filesAmmount; i++) {
         strcat(file, argv[*file_index]);
-        (*file_index)++;     
+        (*file_index)++;    
+        //the special symbol is used to separate the files 
         strcat(file, SPECIAL_SYMBOL_STRING);  
     }
 
-    run_and_check_error(write(fd, file, strlen(file)),"Could not write to file\n",-1);
+    run_and_check_error(write(fd, file, strlen(file)), "Could not write to file\n", -1);
     free(file);       
 }
 
 static void run_and_check_error(int error, char message[], int retval) {
-
     if(error == retval) {
         dprintf(STDERR_FILENO, "%s\n", message);
-        printf("%d\n", errno);
         exit(EXIT_FAILURE);
     }
 }
 
+static void close_pipes(int file_pipes[][2], int buffer_pipes[][2], int slavesAmmount){
+    for(int i = 0; i < slavesAmmount;i++){
+        run_and_check_error(close(file_pipes[i][0]), "Could not close pipe!\n", -1);
+        run_and_check_error(close(file_pipes[i][1]), "Could not close pipe!\n", -1);
+        run_and_check_error(close(buffer_pipes[i][0]), "Could not close pipe!\n", -1);
+        run_and_check_error(close(buffer_pipes[i][1]), "Could not close pipe!\n", -1);
+    }
+}
