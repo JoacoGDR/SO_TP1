@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <dirent.h>
@@ -13,161 +14,183 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/mman.h>
-#include "queuelib.h"
+#include <sys/select.h>
+
 
 #define FILE_LENGTH 100 
 #define SPECIAL_SYMBOL '$'
 #define SPECIAL_SYMBOL_STRING "$"
 #define INITIAL_FILES_TO_GIVE_OUT 2
+#define MAX_LENGTH_TO_READ 1000
+#define BUFFER_SIZE 100000
 
-void create_pipes(int ** file_pipes, int ** buffer_pipes, int slavesAmmount){
-    int height=slavesAmmount, width=2, i, j;
 
-    file_pipes = malloc(height * sizeof(int *));
-    buffer_pipes = malloc(height * sizeof(int *));
+static void run_and_check_error(int error, char message[], int retval);
 
-    for(i = 0; i < width; i++){
-        file_pipes[i] = malloc(width * sizeof(int));
-        buffer_pipes[i] = malloc(width * sizeof(int));
-    }
+static void read_from_slave(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char* buffer_ptr,sem_t * sem, sem_t * file_counter);   
+static void send_files(int fd, int filesAmmount,int * file_index, char * argv[]);
 
+int main(int argc, char * argv[]) {
+    
   
 
-    for(int i = 0; i < slavesAmmount; i++){
-        if(pipe(file_pipes[i]) == -1){
-            printf("Error creating file pipe!\n");
-            return -1;
-        }
-        if(pipe(buffer_pipes[i]) == -1){
-            printf("Error creating buffer pipe!\n");
-            return -1;
-        }
-        //file_pipes[i][0] write
-        // file_pipes[i][1] read
-    }
-}
-
-
-
-int main(int argc, char * argv[]){
-    int files = argc-1;
-    int slavesAmmount = (files)/20; //esto me da la parte entera pero de abajo...
-    slavesAmmount++;
-
-    if(argc-1 < INITIAL_FILES_TO_GIVE_OUT){
-        printf("jdajkdj");
+    
+    if(argc-1 <= 0){
+        printf("No files registered\n");
         return -1;
     }
-    int file_index = 0;
-    
-    int * slaves = malloc(sizeof(char)*slavesAmmount);
 
-    int ** file_pipes;
-    int ** buffer_pipes;
-    create_pipes(file_pipes, buffer_pipes, slavesAmmount);
+    setvbuf(stdout, NULL, _IONBF, 0);  
 
+    int file_index = 1;
+    int files = argc-1;
+
+    int slavesAmmount = (files)/20 + 1;
+    int * slaves = malloc(sizeof(char) * slavesAmmount);
+
+    int buffer_fd; 
+    run_and_check_error(buffer_fd = shm_open("/shared_memory", O_CREAT | O_RDWR  , 0600), "Error when creating shm", -1); /* create s.m object*/   
+    run_and_check_error(ftruncate(buffer_fd, BUFFER_SIZE*sizeof(char)), "Error when setting size of shm", -1);                                 /* resize memory object */
+    char * buffer = mmap(NULL, BUFFER_SIZE*sizeof(char), PROT_WRITE, MAP_SHARED, buffer_fd, 0);
+
+    sem_t * access_shm = sem_open("access_shm", O_CREAT, 0666, 1);
+    sem_t * file_counter = sem_open("files_ready_to_print", O_CREAT | O_RDWR, 0666,0);
+
+
+    sleep(3);
+    printf("%d",argc-1);
     
-    sem_t aux_sem;
-    sem_init(&aux_sem,1,1);
-    sem_t index_sem;
-    sem_init(&index_sem,1,0);
-    
-    sem_t * slave_filesems = malloc(sizeof(sem_t)*slavesAmmount);
-    for(int i = 0; i<slavesAmmount; i++){
-        sem_init(&(slave_filesems[i]),1,0);
-        printf("Creando sem %d\n", i);
+    int file_pipes[slavesAmmount][2];
+    int buffer_pipes[slavesAmmount][2];
+
+    for(int i = 0; i < slavesAmmount; i++) {
+        run_and_check_error(pipe(file_pipes[i]),"Error creating file pipe!\n",-1);
+        run_and_check_error(pipe(buffer_pipes[i]),"Error creating buffer pipe!\n",-1);
     }
 
     int pid;
     // Creo mi cantidad de esclavos.
-    for(int i = 0, done = 0; i < slavesAmmount; i++){
-        pid = fork();
-        if((pid) == -1){
-            // printh("Error: No se pudo crear un esclavo!\n",3); Queremos imprimir esto en el stderr...
-            return -1;
-        }
-        else if(pid == 0){
-            printf("%d created\n", getpid());
-            run_and_check_error(close(fileno(stdin)),"Error closing STDIN\n", -1);                    
-            run_and_check_error(dup(file_pipes[index][0]),"Error dupping file pipe\n", -1);        // new STDIN: read-end of master-to-slave pipe N°i
-            run_and_check_error(close(fileno(stdout)),"Error closing STDOUT\n", -1);           
-            run_and_check_error(dup(buffer_pipes[index][1]),"Error dupping buffer pipe\n", -1);        // new STDOUT: write-end of slave-to-master pipe N°i
-            //CERRAR TODOS LOS PIPES Y EXECVEAR 
-            //EXEC;;
+    for(int i = 0; i < slavesAmmount; i++) {
+        run_and_check_error(pid = fork(), "Error forking\n", -1);
+        if(pid == 0){
+            run_and_check_error(close(fileno(stdin)),"Error closing STDIN\n", -1);
+            run_and_check_error(dup(file_pipes[i][0]),"Error dupping file pipe\n", -1); // new STDIN: read-end of master-to-slave pipe N°i
+            run_and_check_error(close(fileno(stdout)),"Error closing STDOUT\n", -1);       
+            run_and_check_error(dup(buffer_pipes[i][1]),"Error dupping buffer pipe\n", -1); // new STDOUT: write-end of slave-to-master pipe N°i
 
-        }
-        else
-        {
-
-            // father_buffer_fd[i] = buffer_pipes[i][0]; para usar el select despues.... pero por ahora no.
-            slaves[i] = pid;
-            int files = argc-1;
-            int file_index, i;
-            for(i=0, file_index=0; i < slavesAmmount && file_index <= files-INITIAL_FILES_TO_GIVE_OUT; i++){
-                send_files(file_pipes[i][0], INITIAL_FILES_TO_GIVE_OUT, &file_index, argv);
+            for(int i = 0; i<slavesAmmount;i++){
+                close(file_pipes[i][0]);
+                close(file_pipes[i][1]);
+                close(buffer_pipes[i][0]);
+                close(buffer_pipes[i][1]);
             }
-            if(i < slavesAmmount){
-                send_files(file_pipes[i][0], INITIAL_FILES_TO_GIVE_OUT - 1, &file_index, argv);
+
+            execv("slave",argv);
+        }
+        else {   
+            slaves[i] = pid; 
+            if(file_index > argc - INITIAL_FILES_TO_GIVE_OUT){
+                send_files(file_pipes[i][1], 1, &file_index, argv);            
+            }else{
+               send_files(file_pipes[i][1], INITIAL_FILES_TO_GIVE_OUT, &file_index, argv);
             }
-            
         }
     }
+    read_from_slave(buffer_pipes, slavesAmmount, argc, &file_index, argv, file_pipes,buffer, access_shm, file_counter);
+    
+    sem_unlink("access_shm");
+    sem_unlink("files_ready_to_print");
+    sem_close(file_counter);
+    sem_close(access_shm);
 
-
-
-    if(pid == 0){
-        sem_wait(&aux_sem);
-        int index;
-        sem_getvalue(&index_sem,&index);
-        sem_post(&index_sem);
-        sem_post(&aux_sem);
-        close(file_pipes[index][0]);
-
-        
+    for(int i = 0; i < slavesAmmount; i++) {
+        printf("Matando el proceso %d\n", slaves[i]);
+        kill(slaves[i], SIGKILL);
     }
-    else
-    {
-
-    int files = argc-1;
-    int file_index, i;
-      for(i=0, file_index=0; i < slavesAmmount && file_index <= files-INITIAL_FILES_TO_GIVE_OUT; i++){
-          send_files(file_pipes[i][0], INITIAL_FILES_TO_GIVE_OUT, &file_index, argv);
-      }
-      if(i < slavesAmmount){
-          send_files(file_pipes[i][0], INITIAL_FILES_TO_GIVE_OUT - 1, &file_index, argv);
-      }
-
-    }
-
-    //FINALMENTE HAY Q CERRAR TODO Y LIBERAR TODO LO USADO.
-
+    return 0;
 }
+
+static void read_from_slave(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char * buffer_ptr, sem_t * sem,sem_t*file_counter) {
+
+    int files_received = 0;
+
+    fd_set all_fd, aux_fd;
+    FD_ZERO(&all_fd);
+    int retval;
+    int max_fd = 0;
+    FILE * resultado = fopen("resultado", "w");
+
+    while(files_received < argc-1) {
+
+        for(int i = 0; i < slavesAmmount; i++) {
+            if(max_fd < buffer_pipes[i][0]){
+                max_fd = buffer_pipes[i][0];
+            }
+            FD_SET(buffer_pipes[i][0], &all_fd);   // always prepare the readable-fds-set for reading
+        }
+        aux_fd = all_fd;
+        retval = select( max_fd + 1, &aux_fd, NULL, NULL, NULL ); // blocks until a child has something to write to parent
+
+        if(retval > 0){
+            for(int i = 0; i < slavesAmmount; i++) {
+                if(FD_ISSET(buffer_pipes[i][0], &aux_fd)) {
+                    char * answer = calloc(MAX_LENGTH_TO_READ, sizeof(char));
+                    run_and_check_error(read(buffer_pipes[i][0], answer, MAX_LENGTH_TO_READ), "Could not read files!\n", -1);
+               
+                    //SEMAPHORE 
+                    sem_wait(sem);
+                    strcat(buffer_ptr, answer);
+                    sem_post(sem);
+                    sem_post(file_counter);
+
+                
+                    printf("\n %s, sent by %d\n", answer, i);
+                    
+                    files_received++;
+
+                    printf("EL VALOR DE FILE INDEX ES = %d\n", *file_index);
+
+                    if(*file_index < argc) { // BANCA!, puede que haya un slave con la file que me falta, No puedo mandar mas quiza                                                                      ////        este if        ////////
+                        send_files(file_pipes[i][1], 1, file_index, argv);     
+                    }
+                }
+            }
+        }
+    }
+    
+    
+    fprintf(resultado, "%s", buffer_ptr);
+    shm_unlink("/shared_memory");
+    
+    munmap(buffer_ptr,BUFFER_SIZE*sizeof(char));
+
+    
+}
+
 
 static void send_files(int fd, int filesAmmount,int * file_index, char * argv[]) {
     char * file;
-    run_and_check_error((file=calloc(FILE_LENGTH,sizeof(char))),"No more space available for memory allocation\n", NULL);
-    
-    for(int i = 0; i < filesAmmount; i++) {
-        if(argv[*file_index] == NULL){
-            strcat(file, argv[*file_index]);
-            (*file_index)++;     
-            strcat(file, SPECIAL_SYMBOL);  
-        }
+
+    if((file=calloc(FILE_LENGTH, sizeof(char))) == NULL) {
+        dprintf(STDERR_FILENO,"No more space available for memory allocation\n");
+        exit(EXIT_FAILURE);
     }
-    
-    //dprintf(fd, "%s", file);
-    write(fd, file, strlen(file));    
+
+    for(int i = 0; i < filesAmmount; i++) {
+        strcat(file, argv[*file_index]);
+        (*file_index)++;     
+        strcat(file, SPECIAL_SYMBOL_STRING);  
+    }
+
+    run_and_check_error(write(fd, file, strlen(file)),"Could not write to file\n",-1);       
 }
 
-static void run_and_check_error(int error, char message[], int retval){
-    if(error == retval){
-        dprintf(STDERR_FILENO, "%s", message);
+static void run_and_check_error(int error, char message[], int retval) {
+
+    if(error == retval) {
+        dprintf(STDERR_FILENO, "%s\n", message);
+        printf("%d\n", errno);
         exit(EXIT_FAILURE);
     }
 }
-
-
-
-
-
 
