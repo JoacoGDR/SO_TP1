@@ -22,7 +22,7 @@
 #define INITIAL_FILES_TO_GIVE_OUT 2
 #define MAX_LENGTH_TO_READ 1000
 #define BUFFER_SIZE 100000
-
+#define MAX_FILES_ALLOWED 200
 
 static void run_and_check_error(int error, char message[], int retval);
 static void listen_to_slaves(int buffer_pipes[][2], int slavesAmmount, int argc, int * file_index, char * argv[], int file_pipes[][2], char* buffer_ptr,sem_t * sem, sem_t * file_counter);   
@@ -30,10 +30,14 @@ static void send_files(int fd, int filesAmmount,int * file_index, char * argv[])
 static void close_pipes(int file_pipes[][2], int buffer_pipes[][2], int slavesAmmount);
 
 int main(int argc, char * argv[]) {
-
+    
     //checks that at least 1 file is sent as parameter
     if(argc-1 <= 0){
         printf("No files registered\n");
+        return -1;
+    }
+    if(argc-1 > MAX_FILES_ALLOWED){
+        printf("You can only process up to %d files!\n", MAX_FILES_ALLOWED);
         return -1;
     }
 
