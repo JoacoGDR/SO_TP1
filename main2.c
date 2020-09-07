@@ -58,7 +58,7 @@ int main(int argc, char * argv[]) {
 
 
     sleep(3);
-    printf("%d",argc-1);
+    printf("%d\n",argc-1);
     
     int file_pipes[slavesAmmount][2];
     int buffer_pipes[slavesAmmount][2];
@@ -144,11 +144,10 @@ static void read_from_slave(int buffer_pipes[][2], int slavesAmmount, int argc, 
                     sem_post(file_counter);
 
                 
-                    printf("\n %s, sent by %d\n", answer, i);
+                    printf("Slave %d sends: \n", i);
                     
                     files_received++;
 
-                    printf("EL VALOR DE FILE INDEX ES = %d\n", *file_index);
 
                     if(*file_index < argc) { // BANCA!, puede que haya un slave con la file que me falta, No puedo mandar mas quiza                                                                      ////        este if        ////////
                         send_files(file_pipes[i][1], 1, file_index, argv);     
