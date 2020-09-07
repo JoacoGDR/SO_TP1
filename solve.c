@@ -46,7 +46,7 @@ int main(int argc, char * argv[]) {
     int files = argc-1;
 
     int slavesAmmount = (files)/20 + 1;
-    int * slaves = malloc(sizeof(char) * slavesAmmount);
+    int * slaves = malloc(sizeof(int) * slavesAmmount);
 
     int buffer_fd; 
     run_and_check_error(buffer_fd = shm_open("/shared_memory", O_CREAT | O_RDWR  , 0600), "Error when creating shm", -1); /* create s.m object*/   
@@ -107,6 +107,9 @@ int main(int argc, char * argv[]) {
         printf("Matando el proceso %d\n", slaves[i]);
         kill(slaves[i], SIGKILL);
     }
+
+    free(slaves);
+    
     return 0;
 }
 
@@ -142,7 +145,7 @@ static void read_from_slave(int buffer_pipes[][2], int slavesAmmount, int argc, 
                     strcat(buffer_ptr, answer);
                     sem_post(sem);
                     sem_post(file_counter);
-
+                    free(answer);
                 
                     printf("Slave %d sends: \n", i);
                     
@@ -181,7 +184,8 @@ static void send_files(int fd, int filesAmmount,int * file_index, char * argv[])
         strcat(file, SPECIAL_SYMBOL_STRING);  
     }
 
-    run_and_check_error(write(fd, file, strlen(file)),"Could not write to file\n",-1);       
+    run_and_check_error(write(fd, file, strlen(file)),"Could not write to file\n",-1);
+    free(file);       
 }
 
 static void run_and_check_error(int error, char message[], int retval) {

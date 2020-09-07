@@ -33,10 +33,10 @@ void process_file(char file[]);
 int main(int argc, char * argv[]){
     setvbuf(stdout, NULL, _IONBF,0);
 
-    char * file_to_process = calloc(FILE_LENGTH,sizeof(char));
 
+    char file_to_process[FILE_LENGTH] = {'\0'};
     while(1){
-        char * files = calloc(MAX_OUTPUT_LENGTH,sizeof(char));
+        char files[MAX_OUTPUT_LENGTH] = {'\0'};
         run_and_check_error(read(STDIN_FILENO, files, MAX_OUTPUT_LENGTH), "Could not read files!\n", -1);
         int j=0;
         for(int i = 0; files[i] != 0; i++){
@@ -52,6 +52,7 @@ int main(int argc, char * argv[]){
             }
         }
     }
+    
 }
 
 
@@ -70,6 +71,8 @@ void process_file(char file[]) {
         exit(EXIT_FAILURE);
     }
 
+    free(cmd);
+
     char * buf = calloc(MAX_OUTPUT_LENGTH, sizeof(char));
     if(buf == NULL){
         perror("Error with memory allocation!!!");
@@ -87,6 +90,8 @@ void process_file(char file[]) {
     sprintf(aux_pid, "  %d\n", getpid());
     strcat(buf, aux_pid);
     printf("%s", buf);
+
+    free(buf);
 }
 
 
